@@ -1,5 +1,46 @@
 # AI Mac Migration
 
+## Install as Claude Code Skill
+
+The fastest way to use this is as a Claude Code skill. One command, then just talk to Claude.
+
+```bash
+# Clone into your Claude Code skills directory
+git clone https://github.com/genedeng-ca/ai-mac-migration.git ~/.claude/skills/mac-migration
+```
+
+Or if you just want the skill file without the full repo:
+
+```bash
+mkdir -p ~/.claude/skills/mac-migration/skill/scripts
+curl -o ~/.claude/skills/mac-migration/skill/SKILL.md \
+  https://raw.githubusercontent.com/genedeng-ca/ai-mac-migration/master/skill/SKILL.md
+curl -o ~/.claude/skills/mac-migration/skill/scripts/scan.sh \
+  https://raw.githubusercontent.com/genedeng-ca/ai-mac-migration/master/skill/scripts/scan.sh
+curl -o ~/.claude/skills/mac-migration/skill/scripts/verify.sh \
+  https://raw.githubusercontent.com/genedeng-ca/ai-mac-migration/master/skill/scripts/verify.sh
+chmod +x ~/.claude/skills/mac-migration/skill/scripts/*.sh
+```
+
+Then tell Claude: **"Help me migrate my Mac"**
+
+Claude will walk you through scanning your source Mac, building an intelligent migration plan, executing the transfer, and verifying everything landed correctly.
+
+### Standalone scripts
+
+You can also use the helper scripts directly without Claude Code:
+
+```bash
+# Run on the source Mac to get a full system scan
+./skill/scripts/scan.sh           # Human-readable report
+./skill/scripts/scan.sh --json    # JSON output for automation
+
+# Run on the target Mac after migration to verify
+./skill/scripts/verify.sh user@source-mac.local
+```
+
+---
+
 **I haven't reinstalled macOS in 20 years.** Every Mac I've owned has been migrated forward -- from PowerBook G4 to M5 MacBook Pro, across 8 machines, carrying two decades of muscle memory, scripts, configs, and digital life. Apple's Migration Assistant got me 80% there each time. AI got me the rest.
 
 ---
