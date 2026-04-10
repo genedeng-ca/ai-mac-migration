@@ -21,12 +21,13 @@ When it's done, you spend the next two weeks discovering what broke:
 
 ## The Solution
 
-AI Mac Migration replaces blind copying with intelligent transfer. It scans, understands, decides, and verifies -- using local LLMs running on your own hardware. No cloud. No telemetry. Just a smarter migration.
+AI Mac Migration replaces blind copying with intelligent transfer. It scans, understands, decides, and verifies -- using a 122-billion-parameter LLM running locally on your Mac. No cloud. No API calls. No telemetry. Just a smarter migration.
 
 ```
 Source Mac ──SSH──> AI Analysis ──rsync──> Target Mac
                       │
-               Local LLM (OpenClaw)
+               Local LLM on M5 Max
+               Qwen3.5 122B via OpenClaw
                "Should this transfer?
                 Is there a better version?
                 Will this even work on ARM?"
@@ -56,9 +57,9 @@ Source Mac ──SSH──> AI Analysis ──rsync──> Target Mac
 
 ## The Story
 
-This tool was born from migrating an M4 MacBook Pro to an M5 MacBook Pro -- a machine carrying 20 years of accumulated digital life across 85TB of family data, dozens of development environments, and a fleet of AI services.
+This tool was born from migrating an M4 Max MacBook Pro to an M5 Max MacBook Pro -- a machine carrying 20 years of accumulated digital life across 160TB of family data, dozens of development environments, and a fleet of AI services.
 
-The migration was done with Claude Code acting as the orchestrator: scanning both machines over SSH, making real-time decisions about what to transfer, and catching problems that Migration Assistant would have silently propagated.
+The migration was powered by Qwen3.5 122B running locally on the M5 Max itself via OpenClaw -- no cloud APIs, no subscriptions. The AI scanned both machines over SSH, made real-time decisions about what to transfer, and caught problems that Migration Assistant would have silently propagated.
 
 What should have been a weekend of pain became an afternoon of supervised automation. The AI caught things a human would miss:
 
@@ -72,7 +73,7 @@ What should have been a weekend of pain became an afternoon of supervised automa
 | Component | Role |
 |-----------|------|
 | **Python 3.12+** | Core orchestration |
-| **OpenClaw / Local LLMs** | Decision engine (runs on your hardware, no cloud dependency) |
+| **Qwen3.5 122B via OpenClaw** | Decision engine running locally on M5 Max (no cloud dependency) |
 | **SSH** | Secure cross-machine communication |
 | **rsync** | Adaptive file transfer with resume support |
 | **APFS snapshots** | Pre-migration safety net |
@@ -146,4 +147,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-*Built by someone who has mass-migrated too many Macs and finally got tired of doing it manually. Powered by local AI that respects your privacy and understands your machine better than a progress bar ever could.*
+*Built by someone who has mass-migrated too many Macs and finally got tired of doing it manually. Powered by Qwen3.5 122B running locally on Apple Silicon -- no cloud, no API keys, just your Mac understanding itself.*
