@@ -8,35 +8,25 @@ Trigger when user says: "migrate my mac", "transfer to new mac", "mac migration"
 
 ## Prerequisites
 
-Before starting, confirm ALL of these with the user:
+Reuse known, authorized source-host, account and connection details. Establish observable facts through authorized read-only checks before asking the user:
 
-1. **Both Macs on the same network** (Wi-Fi or Ethernet -- Ethernet/Thunderbolt strongly preferred for speed)
-2. **SSH enabled on the SOURCE Mac**: System Settings > General > Sharing > Remote Login
-3. **User knows the source Mac's IP or hostname** (run `ipconfig getifaddr en0` on source to find it)
-4. **Sufficient disk space on the target** (you will check this in Phase 1)
-5. **Both machines plugged into power** (migrations can take hours)
+1. Verify an authorized network route between the two Macs; prefer Ethernet/Thunderbolt for local transfers.
+2. Test existing SSH access to the SOURCE Mac. Do not enable Remote Login, change network settings, bypass host-key checks or obtain new credentials without the applicable authorization.
+3. Reuse the known source IP/hostname and username; ask only when these essential details cannot be established from authorized context or checks.
+4. Check target disk space in Phase 1, rather than asking the user to confirm a fact the tools can inspect.
+5. Check power status where available; ask only for a material prerequisite that cannot be verified.
 
-Ask the user:
-```
-To start migration, I need:
-1. Source Mac IP or hostname (e.g., 192.168.50.42 or old-mac.local)
-2. Username on the source Mac
-3. Are both Macs on the same local network?
-4. Is SSH/Remote Login enabled on the source Mac?
-```
+Do not repeat already answered questions. Ordinary technical failures may be investigated using authorized read-only methods; missing approval or access blocks only the dependent step. All explicit approval, privacy and protected-path rules remain effective. These commands are templates, not permission to install tools, change privileges or write to either machine.
 
 ## Phase 1: Connect & Scan
 
 ### 1.1 Verify SSH connectivity
 
 ```bash
-ssh -o ConnectTimeout=5 USER@SOURCE_IP "echo 'SSH connection successful'"
+ssh -o BatchMode=yes -o ConnectTimeout=5 USER@SOURCE_IP "echo 'SSH connection successful'"
 ```
 
-If this fails, guide the user:
-- "On your source Mac, go to System Settings > General > Sharing > Remote Login and turn it ON"
-- "Make sure both Macs are on the same network"
-- If still failing: `ping SOURCE_IP` to check network
+If this fails, inspect the actual error and authorized network/SSH state. Do not assume every failure means Remote Login is disabled. Ask for essential unresolved access or host details only after safe checks; enabling Remote Login or changing access requires its applicable approval.
 
 ### 1.2 Scan the TARGET Mac (local)
 
@@ -60,13 +50,15 @@ ls ~/Applications/ 2>/dev/null | wc -l
 
 ### 1.3 Scan the SOURCE Mac (remote)
 
-Run the comprehensive scan script on the source machine. You can either copy `scan.sh` over or run commands directly via SSH.
+Use already-authorized read-only inspection. Prefer individual commands below when source-side writes have not been approved. A missing tool is an explicit gap, not a reason to install it automatically.
 
-**Option A: Use the scan script** (preferred)
+**Option A: Use the scan script** (only when its upload and execution are authorized; review the script first)
 ```bash
 scp skill/scripts/scan.sh USER@SOURCE_IP:/tmp/mac_scan.sh
 ssh USER@SOURCE_IP "chmod +x /tmp/mac_scan.sh && /tmp/mac_scan.sh"
 ```
+
+Uploading a script is a source-side write, even when the script's purpose is inspection. Do not treat it as automatically covered by read-only access.
 
 **Option B: Run commands individually via SSH**
 
@@ -167,20 +159,20 @@ ssh USER@SOURCE_IP 'find ~/Library/Preferences -name "*.plist" 2>/dev/null | hea
 
 #### Photo library
 ```bash
-# Photo library size -- CRITICAL to track for verification
+# Photo library size is inventory information, not proof of complete transfer
 ssh USER@SOURCE_IP 'du -sh ~/Pictures/Photos\ Library.photoslibrary 2>/dev/null'
 ssh USER@SOURCE_IP 'find ~/Pictures -maxdepth 1 -type d 2>/dev/null'
 ```
 
 ## Phase 2: Analyze & Plan
 
-After scanning, build a migration plan. Present this to the user for review BEFORE executing anything.
+After scanning, build a migration plan. Present it for approval BEFORE migration writes, overwrites, installations or service activation. This gate does not block already-authorized read-only scanning. Listing a command in the plan, making a backup or generating a verification file is not approval to execute it.
 
 ### 2.1 Architecture analysis
 
 Categorize every app as:
-- **Native ARM (arm64)**: Will work perfectly on Apple Silicon target
-- **Universal (x86_64 + arm64)**: Will work, no action needed
+- **Native ARM (arm64)**: Architecture-compatible; actual operation still requires verification
+- **Universal (x86_64 + arm64)**: Architecture-compatible; actual operation still requires verification
 - **Intel-only (x86_64)**: Needs Rosetta 2 or a native replacement
 - **Unknown**: Manual verification needed
 
@@ -207,11 +199,11 @@ brew --prefix
 - Casks can usually be reinstalled: `brew install --cask APP_NAME`
 
 ```bash
-# Generate reinstall script
+# Generate inventory files only where local file creation is authorized
 ssh USER@SOURCE_IP 'brew list --formula' > /tmp/brew_formula.txt
 ssh USER@SOURCE_IP 'brew list --cask' > /tmp/brew_cask.txt
 
-# On target:
+# On target, only after installation approval:
 # xargs brew install < /tmp/brew_formula.txt
 # xargs brew install --cask < /tmp/brew_cask.txt
 ```
@@ -222,14 +214,14 @@ Organize everything into categories and present to the user:
 
 | Category | Action | Estimated Size |
 |----------|--------|----------------|
-| **Home directory** | rsync with smart exclusions | X GB |
+| **Home directory** | rsync with explicitly approved scope and exclusions | X GB |
 | **Applications** | rsync ARM/Universal, skip Intel | X GB |
 | **Homebrew** | Reinstall from list (arch mismatch) or rsync | X GB |
 | **SSH keys & configs** | rsync + permission fix | < 1 MB |
-| **Shell configs** | rsync + path rewrite check | < 1 MB |
+| **Shell configs** | rsync + approved path rewrite | < 1 MB |
 | **Git config** | rsync | < 1 MB |
-| **LaunchAgents** | Review & selective copy | < 1 MB |
-| **Photos** | rsync + count verification | X GB |
+| **LaunchAgents** | Named files; separate approval for copy and activation | < 1 MB |
+| **Photos** | rsync + content verification; counts are supplemental | X GB |
 | **Virtual Machines** | rsync (large, warn user) | X GB |
 | **SKIP: Caches** | .cache, Library/Caches, etc. | X GB saved |
 | **SKIP: Trash** | .Trash | X GB saved |
@@ -242,7 +234,7 @@ Present the plan and ask:
 Here's the migration plan. Review and confirm:
 
 WILL TRANSFER:
-- [list with sizes]
+- [exact source/target scope, exclusions and sizes]
 
 WILL SKIP (saves X GB):
 - [list with reasons]
@@ -250,17 +242,58 @@ WILL SKIP (saves X GB):
 WILL REINSTALL (architecture mismatch):
 - [list]
 
+LAUNCHAGENTS:
+- [specific files approved for copying]
+- [specific agents approved for loading; copy approval alone does not authorize loading]
+
+OVERWRITES / TRANSFORMATIONS / ROLLBACK:
+- [existing target conflicts, approved rewrites, backup and restoration steps]
+
+REQUIRED ACCEPTANCE:
+- [file-content verification, named package/version checks, app launch, service health and other required checks]
+
 NEEDS YOUR ATTENTION:
 - [license issues, Intel-only apps, etc.]
 
 Proceed? (yes/no)
 ```
 
+A still-valid approval for the exact unexecuted step need not be requested again. New services, new overwrite conflicts or additional runtime impact require renewed approval. Preserve any stricter per-action or channel-specific requirements.
+
+Create `verification-plan.json` in an authorized location from the actual approved scope. It is a verification record, not an approval grant. Include every approved item: unchanged transfers in `entries`; intentional transformations, reinstalls and runtime checks in `manual_checks` with explicit expected outcomes and real evidence. Do not omit an item merely to obtain a passing result.
+
+Example structure (replace with the actual approved paths, exclusions and approval reference; do not treat this example as approval):
+```json
+{
+  "schema_version": 1,
+  "approval_reference": "reference to the existing user-approved migration plan",
+  "entries": [
+    {"source": "Documents", "target": "Documents", "required": true, "exclude": []},
+    {"source": "Pictures", "target": "Pictures", "required": true, "exclude": []},
+    {"source": ".ssh", "target": ".ssh", "required": true, "exclude": []}
+  ],
+  "permissions": [
+    {"path": ".ssh", "mode": "700"}
+  ],
+  "manual_checks": [
+    {"name": "Critical app launch and migrated data access", "status": "pending", "evidence": ""},
+    {"name": "Approved package identities and versions", "status": "pending", "evidence": ""},
+    {"name": "Approved service health and configuration rewrites", "status": "pending", "evidence": ""},
+    {"name": "Target backup and restore procedure", "status": "pending", "evidence": ""}
+  ]
+}
+```
+
+Paths are absolute or relative to the corresponding user's home; do not use `~` or `..`. Add checks for each actual private key's approved permission mode. `exclude` uses case-sensitive Python `fnmatch` patterns against paths relative to each entry; patterns without `/` also match basenames, and excluded directories skip their descendants. Translate the approved transfer exclusions deliberately; rsync filter syntax is not interchangeable with these patterns. Never add exclusions or downgrade a required check to hide a failure. `manual_checks` accept `passed`, `failed`, `pending` or `not_applicable`; passing or not-applicable records require evidence. Keep observed evidence distinct from the script's own automatic checks.
+
 ## Phase 3: Execute Migration
+
+Execute only the approved plan. A missing approval or prerequisite pauses the dependent write, not independent authorized work or delivery of existing findings. Preserve the source, explicit deletion approval and all rollback safeguards.
 
 ### 3.1 Pre-migration safety
 
 ```bash
+# Only with the applicable privilege and migration authorization:
 # Create APFS snapshot on target (safety net)
 sudo tmutil localsnapshot /
 
@@ -268,9 +301,11 @@ sudo tmutil localsnapshot /
 tmutil listlocalsnapshots /
 ```
 
+Before target writes, document and verify the applicable restoration procedure. Snapshot creation alone is not evidence that rollback has been validated. If required rollback preparation cannot be completed, pause the affected change and deliver the diagnosis and remaining requirements.
+
 ### 3.2 Smart rsync for home directory
 
-The master rsync command with intelligent exclusions:
+The following is a template for an approved whole-home scope. For narrower approvals, use the exact approved paths and exclusions instead. Keep LaunchAgents out of the bulk copy regardless; they are handled separately in Phase 3.8.
 
 ```bash
 rsync -avHAX --progress \
@@ -279,6 +314,7 @@ rsync -avHAX --progress \
   --exclude='Library/Caches/' \
   --exclude='Library/Logs/' \
   --exclude='Library/Saved Application State/' \
+  --exclude='Library/LaunchAgents/' \
   --exclude='.docker/' \
   --exclude='.vagrant/' \
   --exclude='node_modules/' \
@@ -319,23 +355,23 @@ rsync -avHAX --progress \
 
 Or more practically, transfer specific apps:
 ```bash
-# For each ARM/Universal app:
+# For each approved ARM/Universal app:
 rsync -avHAX --progress "USER@SOURCE_IP:/Applications/AppName.app" "/Applications/"
 ```
 
-For Intel-only apps with ARM alternatives:
+For Intel-only apps with approved ARM alternatives:
 ```bash
-# Install ARM version via Homebrew cask
+# Install approved ARM version via Homebrew cask
 brew install --cask app-name
 ```
 
 ### 3.4 SSH keys and configs
 
 ```bash
-# Transfer SSH directory
+# Transfer SSH directory only within its approved source/target scope
 rsync -avHAX --progress USER@SOURCE_IP:~/.ssh/ ~/.ssh/
 
-# IMMEDIATELY fix permissions
+# IMMEDIATELY fix permissions as approved
 chmod 700 ~/.ssh
 chmod 600 ~/.ssh/id_* ~/.ssh/*_key 2>/dev/null
 chmod 644 ~/.ssh/*.pub 2>/dev/null
@@ -347,7 +383,7 @@ chmod 644 ~/.ssh/authorized_keys 2>/dev/null
 ### 3.5 Shell configuration
 
 ```bash
-# Transfer shell configs
+# Transfer approved shell configs
 for f in .zshrc .bashrc .zprofile .bash_profile .zshenv; do
   rsync -avHAX --progress "USER@SOURCE_IP:~/$f" ~/ 2>/dev/null
 done
@@ -357,12 +393,13 @@ done
 ```bash
 # Check if any config references /usr/local (Intel Homebrew)
 grep -n '/usr/local' ~/.zshrc ~/.bashrc ~/.zprofile 2>/dev/null
-# If found, warn user and offer to replace with /opt/homebrew
+# Apply only exact rewrites already approved; otherwise propose the changes
 ```
 
 ### 3.6 Homebrew reinstall (if architecture mismatch)
 
 ```bash
+# Run only when installation has been approved
 # Install Homebrew on target if not present
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
@@ -376,7 +413,7 @@ cat /tmp/brew_cask.txt | xargs brew install --cask
 ### 3.7 npm globals
 
 ```bash
-# Reinstall global npm packages
+# Reinstall only the approved global npm package list
 ssh USER@SOURCE_IP "npm list -g --depth=0 --json 2>/dev/null" | \
   python3 -c "import sys,json; d=json.load(sys.stdin).get('dependencies',{}); [print(k) for k in d if k!='npm']" | \
   xargs npm install -g
@@ -384,151 +421,121 @@ ssh USER@SOURCE_IP "npm list -g --depth=0 --json 2>/dev/null" | \
 
 ### 3.8 LaunchAgents (selective)
 
+Read the list approved in Phase 2.4. Do not ask again for the same still-authorized step. A file approved for copying is not automatically approved for loading; new agents, overwrite conflicts or runtime effects require approval before proceeding.
+
 ```bash
-# List and let user choose which to migrate
+# Read-only inventory; this is not permission to copy or load every listed agent
 ssh USER@SOURCE_IP 'ls ~/Library/LaunchAgents/'
 
-# For each approved agent:
+# For each specific file approved for copying:
 rsync -avHAX --progress "USER@SOURCE_IP:~/Library/LaunchAgents/AGENT.plist" ~/Library/LaunchAgents/
 
-# Load it
+# Only for an agent separately approved for activation:
 launchctl load ~/Library/LaunchAgents/AGENT.plist
 ```
 
 ## Phase 4: Verify
 
-Run the verification script or execute checks manually.
+Verify the actual approved plan, not aggregate counts. File counts, sizes, directory existence and successful service startup alone are not end-to-end acceptance. Continue independent checks after an individual failure, retain the result, and always produce a summary.
 
-### 4.1 File count comparison
+### 4.1 Approved-plan verification
+
+`verify.sh` requires Python 3 on both hosts and existing authorized SSH access. It streams its fixed read-only scanner over SSH without installing a remote script. It checks each declared unchanged transfer by relative path, type, SHA-256 content digest and symlink target; it does not follow symlink targets, delete files or modify permissions. Target-only files are retained and reported. Add actual approved permission checks to the plan.
 
 ```bash
-# Compare file counts for critical directories
-for dir in Documents Desktop Pictures Music Downloads; do
-  src=$(ssh USER@SOURCE_IP "find ~/$dir -type f 2>/dev/null | wc -l")
-  dst=$(find ~/$dir -type f 2>/dev/null | wc -l)
-  echo "$dir: source=$src target=$dst $([ "$src" = "$dst" ] && echo 'OK' || echo 'MISMATCH')"
-done
+# Run on the target; preserve the verifier's status
+if bash skill/scripts/verify.sh USER@SOURCE_IP verification-plan.json; then
+  verification_status=0
+else
+  verification_status=$?
+fi
+printf 'Verifier exit status: %s\n' "$verification_status"
 ```
+
+Exit `0` means declared checks passed; `1` means a mismatch or failed check; `2` means evidence is incomplete. Missing plans, missing Python, SSH failure, unreadable/changing files and pending manual checks must not be reported as success. The default source-inventory timeout is 900 seconds; set `VERIFY_TIMEOUT_SECONDS` explicitly for larger approved scopes. A timeout is incomplete evidence, not an empty source. The script's success covers its declared plan only; it cannot authenticate approval or prove that an omitted migration requirement was satisfied.
 
 ### 4.2 Photo verification (CRITICAL)
 
-Photos are irreplaceable. Always verify counts:
-
-```bash
-# Count photos in library
-src_photos=$(ssh USER@SOURCE_IP 'find ~/Pictures -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.heic" -o -name "*.mov" -o -name "*.mp4" \) 2>/dev/null | wc -l')
-dst_photos=$(find ~/Pictures -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.heic" -o -name "*.mov" -o -name "*.mp4" \) 2>/dev/null | wc -l)
-echo "Photos: source=$src_photos target=$dst_photos"
-
-# Also check Photo Library specifically
-src_lib=$(ssh USER@SOURCE_IP 'du -sh ~/Pictures/Photos\ Library.photoslibrary 2>/dev/null')
-dst_lib=$(du -sh ~/Pictures/Photos\ Library.photoslibrary 2>/dev/null)
-echo "Photo Library: source=$src_lib target=$dst_lib"
-```
+Include every approved photo library and RAW/media directory in content verification, without limiting checks to selected extensions. Counts and sizes are supplemental diagnostics. If files change during verification or the library cannot be read, report incomplete evidence and investigate within the approved scope; do not suppress the problem or wipe the source. Record the actual ability to open the migrated library and access its expected data in the required runtime evidence.
 
 ### 4.3 SSH key verification
 
-```bash
-# Check permissions
-ls -la ~/.ssh/
-stat -f "%Sp %SN" ~/.ssh/id_* 2>/dev/null
-
-# Test SSH works
-ssh -T git@github.com 2>&1 | head -1
-```
+Add the actual transferred `.ssh` paths and required modes to `permissions` in the plan. A permissions pass does not prove authentication. Perform any required authentication or agent-forwarding test through the already-authorized destination and record its result. Never print private-key contents, replace credentials or change host trust merely to make a test pass.
 
 ### 4.4 Tool verification
 
-```bash
-# Check common developer tools
-for cmd in git python3 node npm ruby cargo go java docker; do
-  if command -v $cmd &>/dev/null; then
-    echo "OK: $cmd ($(command -v $cmd)) -- $($cmd --version 2>&1 | head -1)"
-  else
-    echo "MISSING: $cmd"
-  fi
-done
+Check each approved package/tool by identity, expected version and applicable operation; a larger package count does not prove the required packages are present. Missing or untestable required tools remain failed or incomplete. Record actual results for reinstalls and intentionally transformed configurations in the plan's manual evidence, rather than incorrectly comparing them byte-for-byte with pre-transformation source files.
 
-# Homebrew health
-brew doctor 2>&1 | head -10
-```
-
-### 4.5 Application launch test
+### 4.5 Application presence and launch checks
 
 ```bash
-# Verify key apps can launch (open and immediately quit)
+# Presence check only: this does NOT launch applications or verify their data
 for app in "Safari" "Terminal" "Visual Studio Code" "iTerm"; do
   if [ -d "/Applications/$app.app" ]; then
-    echo "Found: $app.app"
+    echo "Present only, launch unverified: $app.app"
   else
     echo "Missing: $app.app"
   fi
 done
 ```
 
-### 4.6 VM verification
+Use the actual approved critical-app list, including per-user applications where relevant. Perform permitted launch/data-access tests or obtain user-provided evidence; do not interrupt a running user session or bypass an activation prompt. Record `pending` when launch cannot be tested. A manual evidence record must identify the observed result and its source; the verifier labels it as recorded evidence, not an independently executed launch test.
 
-```bash
-# If VMs were transferred, verify they exist
-ls -la ~/Virtual\ Machines/ 2>/dev/null
-ls -la ~/Parallels/ 2>/dev/null
-find ~ -maxdepth 3 -name "*.vmx" 2>/dev/null
-```
+### 4.6 VM and service verification
+
+Include approved VM files in content verification. Presence alone does not prove a VM boots or a service is healthy; perform only approved runtime tests and record their actual outcomes. Services approved only for copying must remain unloaded; record activation as not applicable with the approval-scope reason when it genuinely was outside scope. Do not relabel a failed required activation as not applicable.
 
 ### 4.7 Final summary
 
-Present a complete migration report:
+Derive the final status from actual evidence:
+
+- **VERIFIED COMPLETE**: Every required approved action and acceptance check passed, and the result was delivered.
+- **PARTIALLY COMPLETE**: Some work is verified, but required work, cleanup or verification remains.
+- **BLOCKED**: An essential permission, approval or prerequisite prevents the dependent work.
+- **FAILED**: Required acceptance failed; report any approved rollback and its verified outcome.
+
+Never print an unconditional `MIGRATION COMPLETE` heading. Report already-verified results while cleanup or approval is pending, but do not mark the entire task complete. Keep explicit deletion approval; no temporary-file exception is introduced.
 
 ```
-MIGRATION COMPLETE
+MIGRATION STATUS: [status justified by the evidence]
 
-Transferred:
-  - X files from home directory
-  - X applications
-  - X Homebrew formulae, X casks
-  - SSH keys and config
-  - Shell configuration files
+Approved scope and reference:
+  - [source, target, approved items and exclusions]
 
-Verification:
-  - Documents: X/X files (OK/MISMATCH)
-  - Pictures: X/X files (OK/MISMATCH)
-  - Photos Library: X GB / X GB
-  - SSH keys: permissions OK/NEEDS FIX
-  - Developer tools: X/X working
+Verified results:
+  - [actual transferred content, exact package identities and completed runtime checks]
 
-Skipped (saved X GB):
-  - Caches, logs, trash
-  - Intel-only apps: [list]
+Failed / incomplete / not applicable:
+  - [each item, reason and evidence; distinguish these states]
 
-Needs manual attention:
-  - [Intel apps without ARM alternatives]
-  - [License reactivation needed for: list]
-  - [Path rewrites needed in configs: list]
+Skipped:
+  - [approved exclusions and reasons]
 
-Recommended next steps:
-  1. Restart the Mac to ensure all services start correctly
-  2. Open each critical app to verify it works
-  3. Deactivate licenses on the old Mac before wiping
-  4. Check iCloud sync status
-  5. Verify Time Machine is configured for the new machine
+Rollback:
+  - [prepared method; any rollback performed and its verified result]
+
+Remaining actions or approval:
+  - [exact blocked steps, pending cleanup, activation or license checks]
 ```
+
+Restarting machines, activating services, deactivating licenses, deleting files or wiping the source still requires the applicable approval. Do not turn a suggested next step into an unauthorized action.
 
 ## Hard-Won Lessons (Guardrails)
 
 These rules are non-negotiable. They come from real migration failures:
 
 1. **ALWAYS check `~/Applications/` not just `/Applications/`** -- many apps install per-user
-2. **ALWAYS verify photo counts** after transfer -- compare source vs destination file counts
+2. **ALWAYS verify photo contents against the approved plan** -- counts alone cannot establish completeness
 3. **ALWAYS check for VMs** in `~/Virtual Machines/`, `~/Parallels/`, and search for `.vmx`/`.vmdk`/`.qcow2`
 4. **ALWAYS look for software licenses** in `~/Library/Application Support/` -- some are hardware-locked
 5. **NEVER use `rsync -z`** on local/fast networks -- compression wastes CPU, slows transfer dramatically
 6. **NEVER blindly copy Intel Homebrew** to ARM Mac -- binaries will crash silently
 7. **WARN about Homebrew path differences**: `/usr/local` (Intel) vs `/opt/homebrew` (ARM)
 8. **CHECK large hidden directories**: `.docker`, `.vagrant`, `.npm`, `.cache`, `.rustup`, `.cargo`, `.pyenv`, `.conda`, `.gradle`, `.m2`
-9. **FIX SSH permissions immediately** after transfer -- wrong permissions = silent auth failure
+9. **FIX SSH permissions immediately** after transfer within the approved scope -- wrong permissions = silent auth failure
 10. **CHECK shell configs for hardcoded paths** -- Intel Homebrew paths in `.zshrc` will break on ARM
 11. **MAP app bundles to data directories** -- app name in `/Applications/` often differs from `~/Library/Application Support/` directory name
 12. **NEVER delete during migration** -- only flag duplicates; human reviews all deletion suggestions
-13. **ALWAYS create an APFS snapshot** on the target before starting -- one-command rollback if anything goes wrong
+13. **ALWAYS create an APFS snapshot** on the target before starting approved writes, and validate the applicable restoration procedure; pause affected writes if this prerequisite cannot be met
 14. **VERIFY Time Machine** is set up on the new Mac before wiping the old one
 15. **TEST SSH agent forwarding** if the user relies on it for git operations
