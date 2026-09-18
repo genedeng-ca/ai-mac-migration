@@ -1,304 +1,212 @@
 #!/bin/bash
-# Mac Migration Verification Script
-# Run on the TARGET Mac after migration to verify everything transferred correctly.
-#
-# Usage: ./verify.sh SOURCE_USER@SOURCE_IP
-#
-# Example: ./verify.sh gene@192.168.50.42
-
-set -euo pipefail
-
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 USER@SOURCE_IP"
-  echo "Example: $0 gene@192.168.50.42"
-  exit 1
+# Read-only verification of the approved migration plan.
+# Usage: ./verify.sh USER@SOURCE_IP verification-plan.json
+# Exit 0: declared checks passed; 1: mismatch/failure; 2: incomplete evidence.
+# A plan records scope; it does not grant approval or authorize data transfer.
+set -u
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '%s\n' 'VERIFICATION SUMMARY: INCOMPLETE — python3 is unavailable'
+  exit 2
 fi
+exec python3 -I -S - "$@" <<'PY'
+import base64
+import fnmatch
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
 
-SOURCE="$1"
-PASS=0
-WARN=0
-FAIL=0
+# Static scanner runs on both hosts. It returns metadata/digests, never file contents.
+SCANNER = r'''
+import fnmatch, hashlib, json, os, stat, sys, base64
 
-pass() { echo "[PASS] $1"; PASS=$((PASS + 1)); }
-warn() { echo "[WARN] $1"; WARN=$((WARN + 1)); }
-fail() { echo "[FAIL] $1"; FAIL=$((FAIL + 1)); }
+def inventory(spec):
+    root = os.path.expanduser(spec["path"])
+    if not os.path.isabs(root):
+        root = os.path.join(os.path.expanduser("~"), root)
+    result = {"present": True, "entries": {}, "errors": []}
+    patterns = spec.get("exclude", [])
+    def visit(path, rel):
+        name = os.path.basename(path)
+        if rel and any(fnmatch.fnmatchcase(rel, p) or
+                       ("/" not in p and fnmatch.fnmatchcase(name, p)) for p in patterns):
+            return
+        try:
+            before = os.lstat(path)
+            if stat.S_ISLNK(before.st_mode):
+                result["entries"][rel] = ["link", os.readlink(path)]
+            elif stat.S_ISREG(before.st_mode):
+                digest = hashlib.sha256()
+                with open(path, "rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                result["entries"][rel] = ["file", before.st_size, digest.hexdigest()]
+            elif stat.S_ISDIR(before.st_mode):
+                result["entries"][rel] = ["directory"]
+                with os.scandir(path) as entries:
+                    children = sorted(entries, key=lambda item: item.name)
+                for child in children:
+                    visit(child.path, child.name if not rel else rel + "/" + child.name)
+            else:
+                raise OSError("unsupported file type")
+            after = os.lstat(path)
+            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            if signature(before) != signature(after):
+                raise OSError("changed while being verified")
+        except FileNotFoundError:
+            if rel == "":
+                result["present"] = False
+            else:
+                result["errors"].append(rel + ": disappeared during scan")
+        except OSError as exc:
+            result["errors"].append((rel or ".") + ": " + str(exc))
+    visit(root, "")
+    return result
 
-echo "============================================"
-echo "  Post-Migration Verification"
-echo "  Target: $(hostname)"
-echo "  Source: $SOURCE"
-echo "  $(date)"
-echo "============================================"
-echo ""
+if __name__ == "__main__":
+    specs = json.loads(base64.urlsafe_b64decode(sys.argv[1]).decode("utf-8"))
+    print(json.dumps([inventory(spec) for spec in specs], ensure_ascii=True))
+'''
 
-# ── 1. File Count Comparison ────────────────────────────────────────────────
+counts = {"PASS": 0, "FAIL": 0, "INCOMPLETE": 0, "N/A": 0}
 
-echo "── File Count Comparison ──"
-for dir in Documents Desktop Pictures Music Downloads; do
-  if [[ -d "$HOME/$dir" ]]; then
-    src=$(ssh "$SOURCE" "find ~/$dir -type f 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ')
-    dst=$(find "$HOME/$dir" -type f 2>/dev/null | wc -l | tr -d ' ')
+def report(status, message):
+    counts[status] += 1
+    print("[{}] {}".format(status, message))
 
-    if [[ -z "$src" ]] || [[ "$src" == "0" ]]; then
-      warn "$dir: source empty or unreachable (source=$src, target=$dst)"
-    elif [[ "$src" == "$dst" ]]; then
-      pass "$dir: $dst/$src files match"
-    else
-      diff=$((src - dst))
-      if [[ $diff -gt 0 ]]; then
-        fail "$dir: MISSING $diff files (source=$src, target=$dst)"
-      else
-        warn "$dir: target has $((-diff)) MORE files than source (source=$src, target=$dst)"
-      fi
-    fi
-  else
-    warn "$dir: directory does not exist on target"
-  fi
-done
-echo ""
+def safe_path(value):
+    return (isinstance(value, str) and bool(value) and "\0" not in value
+            and ".." not in value.split("/") and not value.startswith("~"))
 
-# ── 2. Photo Verification ───────────────────────────────────────────────────
+def validate(plan):
+    if not isinstance(plan, dict) or plan.get("schema_version") != 1:
+        raise ValueError("expected an object with schema_version=1")
+    if not isinstance(plan.get("approval_reference"), str) or not plan["approval_reference"].strip():
+        raise ValueError("record the existing approval reference; a plan is not approval")
+    entries = plan.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("entries must be a non-empty approved source/target list")
+    for entry in entries:
+        if not isinstance(entry, dict) or not all(safe_path(entry.get(k)) for k in ("source", "target")):
+            raise ValueError("entry paths must be absolute or home-relative, without ~ or ..")
+        if type(entry.get("required", True)) is not bool:
+            raise ValueError("required must be boolean")
+        patterns = entry.get("exclude", [])
+        if not isinstance(patterns, list) or not all(isinstance(p, str) and p and "\0" not in p for p in patterns):
+            raise ValueError("exclude must be a list of approved non-empty glob patterns")
+    permissions = plan.get("permissions", [])
+    if not isinstance(permissions, list):
+        raise ValueError("permissions must be a list")
+    for item in permissions:
+        if not isinstance(item, dict) or not safe_path(item.get("path")) or not re.fullmatch(r"[0-7]{3,4}", str(item.get("mode", ""))):
+            raise ValueError("permission checks require a path and octal mode")
+    checks = plan.get("manual_checks", [])
+    if not isinstance(checks, list):
+        raise ValueError("manual_checks must be a list")
+    for check in checks:
+        if not isinstance(check, dict) or not isinstance(check.get("name"), str) or not check["name"].strip():
+            raise ValueError("manual checks require a name")
+        if check.get("status", "pending") not in ("passed", "failed", "pending", "not_applicable"):
+            raise ValueError("invalid manual check status")
+        if not isinstance(check.get("evidence", ""), str):
+            raise ValueError("manual check evidence must be a string")
+    return entries, permissions, checks
 
-echo "── Photo Verification ──"
-PHOTO_EXTENSIONS='-name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.heic" -o -name "*.HEIC" -o -name "*.JPG" -o -name "*.PNG" -o -name "*.mov" -o -name "*.mp4" -o -name "*.MOV" -o -name "*.MP4"'
+def main():
+    if len(sys.argv) != 3:
+        report("INCOMPLETE", "Usage: verify.sh USER@SOURCE_IP verification-plan.json; missing scope is not a pass")
+        return
+    source, plan_path = sys.argv[1:]
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@:%+\-\[\]]*", source):
+        report("INCOMPLETE", "invalid SSH source/alias")
+        return
+    with open(plan_path, encoding="utf-8") as stream:
+        plan = json.load(stream)
+    entries, permissions, checks = validate(plan)
+    scope = [{"path": e["source"], "exclude": e.get("exclude", [])} for e in entries]
+    encoded = base64.urlsafe_b64encode(json.dumps(scope).encode()).decode()
+    command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", source,
+               "python3 -I -S - " + shlex.quote(encoded)]
+    remote = None
+    try:
+        timeout = int(os.environ.get("VERIFY_TIMEOUT_SECONDS", "900"))
+        if timeout <= 0:
+            raise ValueError("VERIFY_TIMEOUT_SECONDS must be positive")
+        proc = subprocess.run(command, input=SCANNER, text=True, capture_output=True, timeout=timeout)
+        if proc.returncode != 0:
+            report("INCOMPLETE", "source inventory unavailable (SSH/remote Python exit {}); not an empty source".format(proc.returncode))
+        else:
+            remote = json.loads(proc.stdout)
+            if not isinstance(remote, list) or len(remote) != len(entries):
+                raise ValueError("invalid source inventory response")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        report("INCOMPLETE", "source inventory could not be established: " + type(exc).__name__)
+        remote = None
+    namespace = {"__name__": "scanner_library"}
+    exec(SCANNER, namespace)
+    scan = namespace["inventory"]
+    for index, entry in enumerate(entries):
+        label = entry["source"] + " -> " + entry["target"]
+        try:
+            local = scan({"path": entry["target"], "exclude": entry.get("exclude", [])})
+            if local["errors"]:
+                report("INCOMPLETE", label + ": target unreadable or changed during scan")
+                continue
+            if remote is None:
+                continue
+            original = remote[index]
+            if not isinstance(original, dict) or not isinstance(original.get("entries"), dict) or type(original.get("present")) is not bool or not isinstance(original.get("errors"), list):
+                raise ValueError("invalid inventory entry")
+            if original["errors"]:
+                report("INCOMPLETE", label + ": source unreadable or changed during scan")
+            elif not original["present"]:
+                report("FAIL" if entry.get("required", True) else "N/A", label + ": source path absent")
+            elif not local["present"]:
+                report("FAIL", label + ": target path absent")
+            else:
+                different = [path for path, value in original["entries"].items() if local["entries"].get(path) != value]
+                if different:
+                    report("FAIL", label + ": {} missing or different entries (SHA-256/type/link checks)".format(len(different)))
+                else:
+                    report("PASS", label + ": {} entries verified by content/type/link".format(len(original["entries"])))
+                extras = len(set(local["entries"]) - set(original["entries"]))
+                if extras:
+                    print("[INFO] {}: {} target-only entries retained; no deletion".format(label, extras))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            report("INCOMPLETE", label + ": check unavailable (" + type(exc).__name__ + ")")
+    for item in permissions:
+        path = item["path"] if os.path.isabs(item["path"]) else os.path.join(os.path.expanduser("~"), item["path"])
+        try:
+            info = os.lstat(path)
+            ok = not stat.S_ISLNK(info.st_mode) and stat.S_IMODE(info.st_mode) == int(str(item["mode"]), 8)
+            report("PASS" if ok else "FAIL", "permission check: " + item["path"])
+        except FileNotFoundError:
+            report("FAIL", "permission target missing: " + item["path"])
+        except OSError:
+            report("INCOMPLETE", "permission target unreadable: " + item["path"])
+    for check in checks:
+        status = check.get("status", "pending")
+        evidence = check.get("evidence", "").strip()
+        if status == "failed":
+            report("FAIL", "recorded manual check: " + check["name"])
+        elif status == "pending" or not evidence:
+            report("INCOMPLETE", "manual evidence required: " + check["name"])
+        else:
+            report("PASS" if status == "passed" else "N/A", "recorded manual evidence (not independently executed): " + check["name"])
 
-src_photos=$(ssh "$SOURCE" "find ~/Pictures -type f \( $PHOTO_EXTENSIONS \) 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ')
-dst_photos=$(eval "find $HOME/Pictures -type f \( $PHOTO_EXTENSIONS \) 2>/dev/null | wc -l" | tr -d ' ')
-
-if [[ -n "$src_photos" ]] && [[ "$src_photos" != "0" ]]; then
-  if [[ "$src_photos" == "$dst_photos" ]]; then
-    pass "Photos: $dst_photos/$src_photos media files match"
-  else
-    fail "Photos: MISMATCH (source=$src_photos, target=$dst_photos)"
-  fi
-else
-  warn "Photos: source count unavailable or zero"
-fi
-
-# Photo Library size comparison
-src_lib_size=$(ssh "$SOURCE" 'du -sk ~/Pictures/Photos\ Library.photoslibrary 2>/dev/null | cut -f1' 2>/dev/null | tr -d ' ')
-dst_lib_size=$(du -sk "$HOME/Pictures/Photos Library.photoslibrary" 2>/dev/null | cut -f1 | tr -d ' ')
-
-if [[ -n "$src_lib_size" ]] && [[ -n "$dst_lib_size" ]] && [[ "$src_lib_size" != "0" ]]; then
-  # Allow 1% variance for filesystem differences
-  tolerance=$((src_lib_size / 100))
-  diff=$((src_lib_size - dst_lib_size))
-  abs_diff=${diff#-}
-  if [[ $abs_diff -le $tolerance ]]; then
-    pass "Photo Library: sizes match within 1% tolerance"
-  else
-    src_human=$(echo "$src_lib_size" | awk '{printf "%.1f GB", $1/1048576}')
-    dst_human=$(echo "$dst_lib_size" | awk '{printf "%.1f GB", $1/1048576}')
-    fail "Photo Library: size mismatch (source=$src_human, target=$dst_human)"
-  fi
-fi
-echo ""
-
-# ── 3. SSH Key Verification ─────────────────────────────────────────────────
-
-echo "── SSH Key Verification ──"
-if [[ -d "$HOME/.ssh" ]]; then
-  ssh_dir_perms=$(stat -f "%Lp" "$HOME/.ssh" 2>/dev/null || stat -c "%a" "$HOME/.ssh" 2>/dev/null)
-  if [[ "$ssh_dir_perms" == "700" ]]; then
-    pass ".ssh directory permissions: 700"
-  else
-    fail ".ssh directory permissions: $ssh_dir_perms (should be 700)"
-  fi
-
-  # Check private key permissions
-  for key in "$HOME"/.ssh/id_* "$HOME"/.ssh/*_key; do
-    [[ -f "$key" ]] || continue
-    [[ "$key" == *.pub ]] && continue
-
-    key_perms=$(stat -f "%Lp" "$key" 2>/dev/null || stat -c "%a" "$key" 2>/dev/null)
-    key_name=$(basename "$key")
-    if [[ "$key_perms" == "600" ]]; then
-      pass "SSH key $key_name: permissions 600"
-    else
-      fail "SSH key $key_name: permissions $key_perms (should be 600)"
-      echo "      Fix: chmod 600 $key"
-    fi
-  done
-
-  # Check SSH config exists
-  if [[ -f "$HOME/.ssh/config" ]]; then
-    pass "SSH config exists"
-  else
-    warn "No SSH config file found"
-  fi
-
-  # Test GitHub SSH
-  github_test=$(ssh -o ConnectTimeout=5 -T git@github.com 2>&1 || true)
-  if echo "$github_test" | grep -q "successfully authenticated"; then
-    pass "GitHub SSH authentication works"
-  else
-    warn "GitHub SSH test inconclusive: $github_test"
-  fi
-else
-  fail ".ssh directory not found"
-fi
-echo ""
-
-# ── 4. Homebrew Verification ────────────────────────────────────────────────
-
-echo "── Homebrew Verification ──"
-if command -v brew &>/dev/null; then
-  pass "Homebrew installed at $(brew --prefix)"
-
-  brew_arch=$(brew --prefix)
-  if [[ "$(uname -m)" == "arm64" ]] && [[ "$brew_arch" == "/opt/homebrew" ]]; then
-    pass "Homebrew on correct ARM path (/opt/homebrew)"
-  elif [[ "$(uname -m)" == "x86_64" ]] && [[ "$brew_arch" == "/usr/local" ]]; then
-    pass "Homebrew on correct Intel path (/usr/local)"
-  else
-    warn "Homebrew path may be mismatched: $brew_arch for $(uname -m)"
-  fi
-
-  # Count packages
-  local_formulae=$(brew list --formula 2>/dev/null | wc -l | tr -d ' ')
-  local_casks=$(brew list --cask 2>/dev/null | wc -l | tr -d ' ')
-
-  src_formulae=$(ssh "$SOURCE" 'brew list --formula 2>/dev/null | wc -l' 2>/dev/null | tr -d ' ')
-  src_casks=$(ssh "$SOURCE" 'brew list --cask 2>/dev/null | wc -l' 2>/dev/null | tr -d ' ')
-
-  if [[ -n "$src_formulae" ]]; then
-    if [[ "$local_formulae" -ge "$src_formulae" ]]; then
-      pass "Homebrew formulae: $local_formulae/$src_formulae"
-    else
-      warn "Homebrew formulae: $local_formulae/$src_formulae (some missing)"
-    fi
-  fi
-
-  if [[ -n "$src_casks" ]]; then
-    if [[ "$local_casks" -ge "$src_casks" ]]; then
-      pass "Homebrew casks: $local_casks/$src_casks"
-    else
-      warn "Homebrew casks: $local_casks/$src_casks (some missing)"
-    fi
-  fi
-
-  # Quick doctor check
-  doctor_issues=$(brew doctor 2>&1 | grep -c "Warning" || true)
-  if [[ "$doctor_issues" == "0" ]]; then
-    pass "brew doctor: no warnings"
-  else
-    warn "brew doctor: $doctor_issues warnings (run 'brew doctor' for details)"
-  fi
-else
-  fail "Homebrew not installed"
-fi
-echo ""
-
-# ── 5. Developer Tools ──────────────────────────────────────────────────────
-
-echo "── Developer Tools ──"
-for cmd in git python3 node npm ruby; do
-  if command -v "$cmd" &>/dev/null; then
-    version=$("$cmd" --version 2>&1 | head -1)
-    pass "$cmd: $version"
-  else
-    warn "$cmd: not found"
-  fi
-done
-
-# Optional tools -- only warn if they were on source
-for cmd in cargo go java docker rustc; do
-  src_has=$(ssh "$SOURCE" "command -v $cmd &>/dev/null && echo yes || echo no" 2>/dev/null)
-  if [[ "$src_has" == "yes" ]]; then
-    if command -v "$cmd" &>/dev/null; then
-      version=$("$cmd" --version 2>&1 | head -1)
-      pass "$cmd: $version"
-    else
-      warn "$cmd: was on source but missing on target"
-    fi
-  fi
-done
-echo ""
-
-# ── 6. Shell Config Verification ────────────────────────────────────────────
-
-echo "── Shell Configuration ──"
-for f in .zshrc .bashrc .zprofile .bash_profile .zshenv; do
-  src_exists=$(ssh "$SOURCE" "[[ -f ~/$f ]] && echo yes || echo no" 2>/dev/null)
-  dst_exists="no"
-  [[ -f "$HOME/$f" ]] && dst_exists="yes"
-
-  if [[ "$src_exists" == "yes" ]] && [[ "$dst_exists" == "yes" ]]; then
-    pass "$f: transferred"
-
-    # Check for Intel Homebrew paths on ARM target
-    if [[ "$(uname -m)" == "arm64" ]]; then
-      intel_refs=$(grep -c '/usr/local/bin\|/usr/local/opt\|/usr/local/Cellar' "$HOME/$f" 2>/dev/null || true)
-      if [[ "$intel_refs" -gt 0 ]]; then
-        warn "$f: contains $intel_refs Intel Homebrew path references (/usr/local) -- may need updating to /opt/homebrew"
-      fi
-    fi
-  elif [[ "$src_exists" == "yes" ]] && [[ "$dst_exists" == "no" ]]; then
-    fail "$f: exists on source but missing on target"
-  fi
-done
-echo ""
-
-# ── 7. Virtual Machines ─────────────────────────────────────────────────────
-
-echo "── Virtual Machines ──"
-src_vms=$(ssh "$SOURCE" 'ls ~/Virtual\ Machines/ ~/Parallels/ 2>/dev/null | grep -c . || echo 0' 2>/dev/null)
-dst_vms=$(ls "$HOME/Virtual Machines/" "$HOME/Parallels/" 2>/dev/null | grep -c . || echo 0)
-
-if [[ "$src_vms" != "0" ]]; then
-  if [[ "$dst_vms" -ge "$src_vms" ]]; then
-    pass "Virtual machines: $dst_vms/$src_vms transferred"
-  else
-    fail "Virtual machines: $dst_vms/$src_vms (some missing)"
-  fi
-else
-  pass "No virtual machines to verify"
-fi
-echo ""
-
-# ── 8. LaunchAgents ──────────────────────────────────────────────────────────
-
-echo "── LaunchAgents ──"
-src_agents=$(ssh "$SOURCE" 'ls ~/Library/LaunchAgents/ 2>/dev/null | grep -c . || echo 0' 2>/dev/null)
-dst_agents=$(ls "$HOME/Library/LaunchAgents/" 2>/dev/null | grep -c . || echo 0)
-
-if [[ "$src_agents" != "0" ]]; then
-  echo "  Source agents: $src_agents, Target agents: $dst_agents"
-  if [[ "$dst_agents" -ge "$src_agents" ]]; then
-    pass "LaunchAgents: $dst_agents/$src_agents present"
-  else
-    warn "LaunchAgents: $dst_agents/$src_agents (review which ones should migrate)"
-  fi
-else
-  pass "No LaunchAgents to verify"
-fi
-echo ""
-
-# ── Summary ──────────────────────────────────────────────────────────────────
-
-TOTAL=$((PASS + WARN + FAIL))
-echo "============================================"
-echo "  VERIFICATION SUMMARY"
-echo "============================================"
-echo "  Passed:   $PASS"
-echo "  Warnings: $WARN"
-echo "  Failed:   $FAIL"
-echo "  Total:    $TOTAL checks"
-echo ""
-
-if [[ $FAIL -gt 0 ]]; then
-  echo "  STATUS: ISSUES FOUND -- review FAIL items above"
-  echo ""
-  echo "  Recommended actions:"
-  echo "  1. Fix any SSH key permission issues immediately"
-  echo "  2. Re-run rsync for directories with missing files"
-  echo "  3. Update Intel Homebrew paths in shell configs"
-  echo "  4. Reinstall missing Homebrew packages"
-  exit 1
-elif [[ $WARN -gt 0 ]]; then
-  echo "  STATUS: MOSTLY OK -- review WARN items"
-  exit 0
-else
-  echo "  STATUS: ALL CLEAR -- migration verified successfully"
-  exit 0
-fi
+try:
+    main()
+except (OSError, ValueError, TypeError, KeyError) as exc:
+    report("INCOMPLETE", "verification input/check error: " + str(exc))
+except KeyboardInterrupt:
+    report("INCOMPLETE", "verification interrupted")
+if not counts["PASS"] and not counts["FAIL"] and not counts["INCOMPLETE"]:
+    report("INCOMPLETE", "no applicable checks verified")
+status, code = ("FAILED", 1) if counts["FAIL"] else (("INCOMPLETE", 2) if counts["INCOMPLETE"] else ("PASSED", 0))
+print("VERIFICATION SUMMARY: {} | PASS={} FAIL={} INCOMPLETE={} N/A={}".format(status, counts["PASS"], counts["FAIL"], counts["INCOMPLETE"], counts["N/A"]))
+print("Scope: declared approved-plan checks only; not an automatic declaration that the entire migration is complete.")
+sys.exit(code)
+PY
